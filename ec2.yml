@@ -1,0 +1,99 @@
+- hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    keypair: "aws_ansible"
+    instance_type: "t2.micro"
+    image: "ami-0bcc094591f354be2"
+    group: "mysecgroup"
+    region: "us-east-1"
+
+
+  tasks:
+    - name: Создание EC2 instance для сборочной машины
+      ec2: image={{ image }}
+           instance_type={{ instance_type }}
+           keypair={{ keypair }}
+           instance_tags='{ "Name":"Buildfarm" , "Group":"buildfarm" }'
+           region={{ region }}
+           group={{ group }}
+           wait=true
+      register: ec2_info_build
+
+    - name: Добавляем сборочную машину в группу ec2hosts
+      add_host: hostname={{ item.public_ip }} groupname=ec2hosts
+      with_items: "{{ ec2_info_build.instances }}"
+
+    - name: Добавляем сборочную машину в группу ec2buildfarm
+      add_host: hostname={{ item.public_ip }} groupname=ec2buildfarm
+      with_items: "{{ ec2_info_build.instances }}"
+
+
+
+    - name: Создание EC2 instance для ПРОД-машины
+      ec2: image={{ image }}
+           instance_type={{ instance_type }}
+           keypair={{ keypair }}
+           instance_tags='{ "Name":"App" , "Group":"app" }'
+           region={{ region }}
+           group={{ group }}
+           wait=true
+      register: ec2_info_prod
+
+    - name: Добавляем ПРОД в группу ec2hosts
+      add_host: hostname={{ item.public_ip }} groupname=ec2hosts
+      with_items: "{{ ec2_info_prod.instances }}"
+
+    - name: Добавляем ПРОД в группу ec2app
+      add_host: hostname={{ item.public_ip }} groupname=ec2app
+      with_items: "{{ ec2_info_prod.instances }}"
+
+
+    - name: Ожидаем запуска SSH на сборочной машине
+      wait_for: host={{ item.public_ip }} port=22 delay=60 timeout=320 state=started
+      with_items: "{{ ec2_info_build.instances }}"
+
+    - name: Ожидаем запуска SSH на ПРОД
+      wait_for: host={{ item.public_ip }} port=22 delay=60 timeout=320 state=started
+      with_items: "{{ ec2_info_prod.instances }}"
+
+    - name: Пишем fingerprint сборочной машины в known hosts
+      connection: local
+      shell: "ssh-keyscan -H {{ item.public_ip }} >> ~/.ssh/known_hosts"
+      with_items: "{{ ec2_info_build.instances }}"
+
+    - name: Пишем fingerprint ПРОД в known hosts
+      connection: local
+      shell: "ssh-keyscan -H {{ item.public_ip }} >> ~/.ssh/known_hosts"
+      with_items: "{{ ec2_info_prod.instances }}"
+
+- hosts: ec2hosts
+  gather_facts: no
+  user: ubuntu
+  sudo: yes
+  pre_tasks:
+      # Установка pyhton для ansible на инстансы EC2
+      - raw: sudo apt-get -y install python
+      # Сборка фактов после установки python
+      - action: setup
+
+  tasks:
+    - name: Установка docker на все машины
+      apt:
+        name=docker.io
+        state=latest
+ 
+- hosts: ec2buildfarm
+  gather_facts: yes
+  user: ubuntu
+  tasks:
+     - name: Запуск сборки
+       include: buildfarm/tasks/main.yml
+
+- hosts: ec2app
+  gather_facts: yes
+  user: ubuntu
+  tasks:
+     - name: Запуск машины с приложением
+       include: app/tasks/main.yml
+
