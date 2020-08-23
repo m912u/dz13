@@ -1,13 +1,12 @@
 - hosts: localhost
   connection: local
-  gather_facts: False
+  gather_facts: no
   vars:
     keypair: "aws_ansible"
     instance_type: "t2.micro"
     image: "ami-0bcc094591f354be2"
     group: "mysecgroup"
     region: "us-east-1"
-
 
   tasks:
     - name: Создание EC2 instance для сборочной машины
@@ -27,8 +26,6 @@
     - name: Добавляем сборочную машину в группу ec2buildfarm
       add_host: hostname={{ item.public_ip }} groupname=ec2buildfarm
       with_items: "{{ ec2_info_build.instances }}"
-
-
 
     - name: Создание EC2 instance для ПРОД-машины
       ec2: image={{ image }}
@@ -50,11 +47,11 @@
 
 
     - name: Ожидаем запуска SSH на сборочной машине
-      wait_for: host={{ item.public_ip }} port=22 delay=60 timeout=320 state=started
+      wait_for: host={{ item.public_ip }} port=22 delay=20 timeout=320 state=started
       with_items: "{{ ec2_info_build.instances }}"
 
     - name: Ожидаем запуска SSH на ПРОД
-      wait_for: host={{ item.public_ip }} port=22 delay=60 timeout=320 state=started
+      wait_for: host={{ item.public_ip }} port=22 delay=20 timeout=320 state=started
       with_items: "{{ ec2_info_prod.instances }}"
 
     - name: Пишем fingerprint сборочной машины в known hosts
@@ -70,30 +67,76 @@
 - hosts: ec2hosts
   gather_facts: no
   user: ubuntu
-  sudo: yes
+  become: yes
   pre_tasks:
-      # Установка pyhton для ansible на инстансы EC2
-      - raw: sudo apt-get -y install python
-      # Сборка фактов после установки python
-      - action: setup
+    - name: Установка pyhton для ansible на инстансы EC2
+      raw: apt-get -y install python
+    - name: Сборка фактов после установки python
+      action: setup
 
   tasks:
-    - name: Установка docker на все машины
-      apt:
-        name=docker.io
-        state=latest
- 
+    - name: Устанавливаем необходимые системные пакеты
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common', 'python3-pip', 'virtualenv', 'python3-setuptools']
+
+    - name: Добавляем Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Добавляем Docker APT репозщиторий
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/{{ansible_distribution|lower}} {{ansible_distribution_release}} stable
+        state: present
+
+    - name: Устанавливаем docker-ce
+      apt: update_cache=yes name=docker-ce state=latest
+
+    - name: Устанавливаем Pip-модуль docker (нужен ansible)
+      pip:
+        name: docker
+
 - hosts: ec2buildfarm
   gather_facts: yes
   user: ubuntu
+  become: yes
   tasks:
-     - name: Запуск сборки
-       include: buildfarm/tasks/main.yml
 
+  - name: Создаем директорию для credentionals
+    file:
+      path: /root/.docker
+      state: directory
+
+  - name: Копируем dockerhub creds
+    copy:
+      src: /root/.docker/config.json
+      dest: /root/.docker/config.json
+
+  - name: Клорируем репозиторий приложения
+    git:
+      repo: https://github.com/m912u/dz12_app42fork
+      dest: /tmp/src/
+
+  - name: Собираем докер-образ и пушим его в наш репоизторий на Dockerhub
+    docker_image:
+      build:
+        path: /tmp/src/
+      repository: m912u/dvps
+      name: dvps
+      tag: latest
+      push: yes
+      source: build
+
+ 
 - hosts: ec2app
   gather_facts: yes
   user: ubuntu
+  become: yes
   tasks:
-     - name: Запуск машины с приложением
-       include: app/tasks/main.yml
 
+  - name: Создаем контейнер из докер-образа в репозитории
+    docker_container:
+      name: myapp
+      image: 'm912u/dvps:latest'
+      published_ports: 
+        - 8080:8080
